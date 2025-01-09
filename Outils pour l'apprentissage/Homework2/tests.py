@@ -38,7 +38,7 @@ def test_sequential_backward(full_model, local_model):
     with torch.no_grad():
         dist.broadcast(inputs, src=0)
         dist.broadcast(targets, src=0)
-
+    
     if rank == world_size - 1:
         full_output = full_model(inputs)
         full_loss = nn.MSELoss()(full_output, targets)
@@ -61,7 +61,7 @@ def test_sequential_backward(full_model, local_model):
 
         # Compare gradients with full model
         for name, full_param in full_model.named_parameters():
-            assert torch.allclose(all_params[name], full_param.grad), f"Gradient for {name} doesn't match. Difference: {torch.norm(all_params[name].grad - full_param.grad)}"
+            assert torch.allclose(all_params[name], full_param.grad), f"Gradient for {name} doesn't match. Difference: {torch.norm(all_params[name] - full_param.grad)}"
         print("Passed")
 
 def test_pipelined_iteration(full_model, local_model):

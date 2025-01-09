@@ -37,68 +37,60 @@ def sequential_forward(model_part, inputs):
     
     # Process the inputs through the local model segment
     outputs = model_part(inputs)
+    outputs.retain_grad()  # Retain gradients for non-leaf tensors
     
     if rank != world_size - 1:
         # Send outputs to the next rank
         dist.send(outputs, dst=rank + 1)
 
-    return inputs, outputs # both are needed for backward pass
+    return inputs, outputs  # both are needed for backward pass
 
 def sequential_backward(inputs, outputs, targets, loss_fn):
     """
-    Executes a backward pass in a pipeline-parallel distributed setup.
+    Executes a backward pass in a pipeline-parallel distributed setup
+    
+    - Last rank computes the loss and backwards from there
+    - Other ranks receive gradients from the next rank and perform backward on outputs with received gradients
+    - All ranks except first send gradients to the previous rank
 
-    - Last rank computes the loss and starts the backward pass.
-    - Other ranks receive gradients from the next rank and perform backward on outputs with received gradients.
-    - All ranks except the first send gradients to the previous rank.
-
-    Returns:
-        Loss on the last rank.
+    hint: tensor.backward() can take a gradient tensor as an argument
+    
+    Returns the loss on the last rank
     """
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    loss = None
-
-    # Ensure inputs require gradients
-    if rank != 0:
-        inputs.requires_grad = True  # Ensure inputs have requires_grad=True
 
     if rank == world_size - 1:
-        # Compute loss and backward
+        # Last rank computes the loss
         loss = loss_fn(outputs, targets)
-        print(f"[Rank {rank}] Loss computed: {loss.item()}")
-
-        # Ensure input gradients are properly connected to the graph
-        if inputs.grad is None:
-            print(f"[Rank {rank}] inputs.grad is None, setting requires_grad=True on inputs")
-            inputs.requires_grad = True  # Ensure inputs have requires_grad=True before backward pass
+        print(loss)
         
-        # Backward pass from the last rank
-        loss.backward()
-        print(f"[Rank {rank}] Computed gradients for inputs: {inputs.grad}")
+        if outputs is None:
+            print(f"[Rank {rank}] Output is None in rank==. Check forward pass.")
+        else:
+            print(f"[Rank {rank}] Output is valid tensor in rank==: {outputs.shape}")
 
-        # Check for None gradient and manually trigger backward if needed
-        if inputs.grad is None:
-            print(f"[Rank {rank}] Manual gradient computation for inputs using autograd.grad")
-            grads = torch.autograd.grad(loss, inputs, retain_graph=True, allow_unused=True)[0]
-            inputs.grad = grads  # Set the computed gradients to inputs
-            print(f"[Rank {rank}] Computed manual gradient for inputs: {inputs.grad}")
+        loss.backward()  # Compute gradients
+        
+        if loss is None:
+            print(f"[Rank {rank}] Loss is None. Check loss function and input tensors.")
+
+        grad_outputs = outputs.grad  # Extract the gradient of outputs for sending to the previous rank
     else:
-        # Receive gradients from the next rank and backward
-        gradients = torch.zeros_like(outputs)
-        dist.recv(gradients, src=rank + 1)
-        print(f"[Rank {rank}] Received gradients: {gradients}")
-
-        # Perform backward on outputs using received gradients
-        outputs.backward(gradients, retain_graph=True)
-        print(f"[Rank {rank}] Backward pass completed")
+        # Other ranks receive gradients from the next rank
+        grad_outputs = torch.zeros_like(outputs)
+        dist.recv(grad_outputs, src=rank + 1)  # Receive gradients from the next rank
+        
+        if outputs is None:
+            print(f"[Rank {rank}] Output is None in else. Check forward pass.")
+        else:
+            print(f"[Rank {rank}] Output is valid tensor in else: {outputs.shape}")
+        
+        outputs.backward(grad_outputs)  # Backward pass with received gradients
 
     if rank != 0:
         # Send gradients to the previous rank
-        if inputs.grad is None:
-            raise ValueError(f"Inputs.grad is None on rank {rank}. Backward pass might not be correct.")
-        print(f"[Rank {rank}] Sending gradients: {inputs.grad}")
-        dist.send(inputs.grad, dst=rank - 1)
+        dist.send(outputs.grad, dst=rank - 1)
 
     if rank == world_size - 1:
         return loss
@@ -193,7 +185,7 @@ if __name__ == "__main__":
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
-    # Define the model and split it across ranks
+    # This is the full model
     model = nn.Sequential(
         nn.Linear(32, 32),
         nn.ReLU(),
@@ -202,35 +194,40 @@ if __name__ == "__main__":
         nn.Linear(32, 32),
         nn.ReLU(),
         nn.Linear(32, 32),
-        nn.Identity()
+        nn.Identity() # an even number of layers is easier to split
     )
+
+    # Each rank gets a part of the model
     layers_per_rank = len(model) // world_size
     local_model = model[rank * layers_per_rank : (rank + 1) * layers_per_rank]
     print(f"Rank {rank} model: {local_model}")
 
-    inputs = torch.randn(256, 32)
-    targets = torch.randn(256, 32)
+    inputs = torch.randn(256, 32) # inputs to the full model
+    targets = torch.randn(256, 32) # targets
 
-    # Test sequential forward
     try:
         inputs, outputs = sequential_forward(local_model, inputs)
         print(f"[Rank {rank}] Sequential forward succeeded")
     except Exception as e:
         print(f"[Rank {rank}] Sequential forward failed with error: {e}")
 
-    # Test sequential backward
     try:
-        sequential_backward(inputs, outputs, targets, nn.MSELoss())
+        sequential_backward(inputs, outputs, targets, nn.functional.mse_loss)
         print(f"[Rank {rank}] Sequential backward succeeded")
     except Exception as e:
         print(f"[Rank {rank}] Sequential backward failed with error: {e}")
 
-    # Test pipelined iteration
     try:
-        pipelined_iteration(local_model, inputs, targets, nn.MSELoss())
+        pipelined_iteration(local_model, inputs, targets, nn.functional.mse_loss)
         print(f"[Rank {rank}] Pipeline iteration succeeded")
     except Exception as e:
         print(f"[Rank {rank}] Pipeline iteration failed with error: {e}")
+
+    try:
+        pipelined_training(local_model)
+        print(f"[Rank {rank}] Pipeline training succeeded")
+    except Exception as e:
+        print(f"[Rank {rank}] Pipeline training failed with error: {e}")
 
     dist.destroy_process_group()
 
