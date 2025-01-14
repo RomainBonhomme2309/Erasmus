@@ -32,7 +32,7 @@ def sequential_forward(model_part, inputs):
     
     if rank != 0:
         # Receive inputs from the previous rank
-        inputs = torch.zeros_like(inputs)
+        inputs = torch.zeros_like(inputs, requires_grad=True)
         dist.recv(inputs, src=rank - 1)
     
     # Process the inputs through the local model segment
@@ -63,34 +63,17 @@ def sequential_backward(inputs, outputs, targets, loss_fn):
     if rank == world_size - 1:
         # Last rank computes the loss
         loss = loss_fn(outputs, targets)
-        print(loss)
-        
-        if outputs is None:
-            print(f"[Rank {rank}] Output is None in rank==. Check forward pass.")
-        else:
-            print(f"[Rank {rank}] Output is valid tensor in rank==: {outputs.shape}")
-
         loss.backward()  # Compute gradients
-        
-        if loss is None:
-            print(f"[Rank {rank}] Loss is None. Check loss function and input tensors.")
-
         grad_outputs = outputs.grad  # Extract the gradient of outputs for sending to the previous rank
     else:
         # Other ranks receive gradients from the next rank
         grad_outputs = torch.zeros_like(outputs)
-        dist.recv(grad_outputs, src=rank + 1)  # Receive gradients from the next rank
-        
-        if outputs is None:
-            print(f"[Rank {rank}] Output is None in else. Check forward pass.")
-        else:
-            print(f"[Rank {rank}] Output is valid tensor in else: {outputs.shape}")
-        
-        outputs.backward(grad_outputs)  # Backward pass with received gradients
+        dist.recv(grad_outputs, src=rank + 1)  # Receive gradients from the next rank        
+        outputs.backward(grad_outputs)
 
     if rank != 0:
         # Send gradients to the previous rank
-        dist.send(outputs.grad, dst=rank - 1)
+        dist.send(inputs.grad, dst=rank - 1)
 
     if rank == world_size - 1:
         return loss
