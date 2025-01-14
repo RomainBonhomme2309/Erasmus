@@ -218,8 +218,31 @@ if __name__ == "__main__":
 """
 Additional question (optional):
 
-Megatron-LM (https://arxiv.org/pdf/2104.04473) proposes a mechanism called "interleaving" (Section 2.2). Its idea is to assign multiple stages to each rank, instead of one.
+Megatron-LM (https://arxiv.org/pdf/2104.04473) proposes a mechanism called "interleaving" (Section 2.2). 
+Its idea is to assign multiple stages to each rank, instead of one.
+
 - What is the main benefit of this approach?
+    The main benefit is the improved performance of the hardware. The technique increases the use of the GPUs while maintaining pipeline parallelism 
+    by ensuring that different sections of the model are calculated at the same time which increases the throughput and effectiveness of the process, 
+    and which enables the use of numerous GPUs or very large models.
+
+
 - What is the main drawback?
+    The main drawback is the increased memory consumption. Since every rank manages several stages, it needs to keep the model weights and activation
+    data in a memory for all the stages it manages. Over time, this may result in considerable raise in memory requirements, which in turn could limit 
+    the expansion of the system on memory-constrained hardware.
+
+
 - What would you change in the code to implement this?
+    * Multiple Stages per Rank : Each rank should handle multiple stages of the model instead of just one. This requires modifying the model_part
+    to include a collection of sequential submodels. Each rank will then process inputs through all its assigned stages in sequence before passing the 
+    output to the next rank.
+    
+    * Forward Pass : The sequential_forward function needs to loop through all stages assigned to the rank and process the input sequentially 
+    through each one. After all local stages are processed, the final output should be sent to the next rank in the pipeline.
+    
+    * Backward Pass : The sequential_backward function must handle gradients for all stages in reverse order. During the backward pass, 
+    each rank should compute gradients for all its stages starting from the last one. If the rank receives gradients from the next rank, it should 
+    propagate these gradients backward through its stages and send the computed gradients to the previous rank.
+
 """
